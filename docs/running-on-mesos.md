@@ -518,7 +518,7 @@ See the [configuration page](configuration.html) for information on Spark config
       <code>spark.mesos.[driver|executor].secret.values</code>
       property, to make the secret available in the driver or executors.
       For example, to make a secret password "guessme" available to the driver process, set:
-    
+
       <pre>spark.mesos.driver.secret.values=guessme</pre>
     </p>
     <p>
@@ -593,9 +593,9 @@ See the [configuration page](configuration.html) for information on Spark config
       provide a comma-separated list:
 
       <pre>spark.mesos.driver.secret.envkeys=PASSWORD1,PASSWORD2</pre>
-    
+
       or
-    
+
       <pre>spark.mesos.driver.secret.filenames=pwdfile1,pwdfile2</pre>
     </p>
   </td>
@@ -685,11 +685,21 @@ See the [configuration page](configuration.html) for information on Spark config
   <td><code>spark.mesos.driver.failoverTimeout</code></td>
   <td><code>0.0</code></td>
   <td>
-    The amount of time (in seconds) that the master will wait for the 
-    driver to reconnect, after being temporarily disconnected, before 
-    it tears down the driver framework by killing all its 
-    executors. The default value is zero, meaning no timeout: if the 
+    The amount of time (in seconds) that the master will wait for the
+    driver to reconnect, after being temporarily disconnected, before
+    it tears down the driver framework by killing all its
+    executors. The default value is zero, meaning no timeout: if the
     driver disconnects, the master immediately tears down the framework.
+  </td>
+</tr>
+<tr>
+  <td><code>spark.mesos.appJar.local.resolution.mode</code></td>
+  <td><code>host</code></td>
+  <td>
+  Provides support for the local:/// scheme to reference the app jar resource in cluster mode.
+  If user uses a local resource (local:///path/to/jar) and the config option is not used it defaults to `host` eg. the mesos fetcher tries to get the resource from the host's file system.
+  If the value is unknown it prints a warning msg in the dispatcher logs and defaults to host.
+  If the user uses container value then spark submit in the container will use the jar in the container's path: /path/to/jar.
   </td>
 </tr>
 </table>
