@@ -27,6 +27,9 @@ IMAGE_TAG="N/A"
 SPARK_MASTER=
 NAMESPACE=
 SERVICE_ACCOUNT=
+EXTRA_JARS=
+INCLUDE_TAGS=
+EXCLUDE_TAGS=
 
 # Parse arguments
 while (( "$#" )); do
@@ -59,6 +62,18 @@ while (( "$#" )); do
       SERVICE_ACCOUNT="$2"
       shift
       ;;
+    --extra-jars)
+      EXTRA_JARS="$2"
+      shift
+      ;;
+    --include-tags)
+      INCLUDE_TAGS="$2"
+      shift
+      ;;
+    --exclude-tags)
+      EXCLUDE_TAGS="$2"
+      shift
+      ;;
     *)
       break
       ;;
@@ -88,6 +103,21 @@ fi
 if [ -n $SPARK_MASTER ];
 then
   properties=( ${properties[@]} -Dspark.kubernetes.test.master=$SPARK_MASTER )
+fi
+
+if [ -n $EXTRA_JARS ];
+then
+  properties=( ${properties[@]} -Dspark.kubernetes.test.extraJars=$EXTRA_JARS )
+fi
+
+if [ -n $EXCLUDE_TAGS ];
+then
+  properties=( ${properties[@]} -Dtest.exclude.tags=$EXCLUDE_TAGS )
+fi
+
+if [ -n $INCLUDE_TAGS ];
+then
+  properties=( ${properties[@]} -Dtest.include.tags=$INCLUDE_TAGS )
 fi
 
 ../../../build/mvn integration-test ${properties[@]}
