@@ -22,6 +22,7 @@ import java.util.UUID
 import java.util.regex.Pattern
 
 import scala.collection.JavaConverters._
+import scala.util.Random
 
 import com.google.common.io.PatternFilenameFilter
 import io.fabric8.kubernetes.api.model.{Container, Pod}
@@ -33,13 +34,14 @@ import org.scalatest.time.{Minutes, Seconds, Span}
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.deploy.k8s.integrationtest.backend.{IntegrationTestBackend, IntegrationTestBackendFactory}
 import org.apache.spark.deploy.k8s.integrationtest.config._
+import org.apache.spark.internal.Logging
 
-object NoDCOS extends Tag("noDcos")
+object NoKerberos extends Tag("NoKerberos")
 
-private[spark] class KubernetesSuite extends SparkFunSuite
+private[spark] class LightbendKubernetesSuite extends SparkFunSuite
   with BeforeAndAfterAll with BeforeAndAfter {
 
-  import KubernetesSuite._
+  import LightbendKubernetesSuite._
 
   private var testBackend: IntegrationTestBackend = _
   private var sparkHomeDir: Path = _
@@ -84,6 +86,10 @@ private[spark] class KubernetesSuite extends SparkFunSuite
   }
 
   before {
+    resetPodProperties()
+  }
+
+  private def resetPodProperties(): Unit = {
     appLocator = UUID.randomUUID().toString.replaceAll("-", "")
     driverPodName = "spark-test-app-" + UUID.randomUUID().toString.replaceAll("-", "")
     sparkAppConf = kubernetesTestComponents.newSparkAppConf()
@@ -103,96 +109,111 @@ private[spark] class KubernetesSuite extends SparkFunSuite
     deleteDriverPod()
   }
 
-  test("Run SparkPi with no resources") {
-    runSparkPiAndVerifyCompletion()
+  test("Run basic read/write HDFS job (DFSReadWriteTest)", NoKerberos) {
+    runDFSReadWriteTestAndVerifyCompletion()
   }
 
-  test("Run SparkPi with a very long application name.") {
-    sparkAppConf.set("spark.app.name", "long" * 40)
-    runSparkPiAndVerifyCompletion()
+  test("Run basic read/write Kafka job (KafkaToHdfsWithCheckpointing)", NoKerberos) {
+    val topic = s"test-topic-${Random.alphanumeric.take(5).mkString}"
+    // Write data to Kafka by submitting a main
+    runProducerTestAndVerifyCompletion(topic = topic)
+    resetPodProperties()
+    // Read from kafka with structured streaming
+    runKafkaWithStructuredStreamingTestAndVerifyCompletion(topic = topic)
   }
 
-  test("Run SparkPi with a master URL without a scheme.", NoDCOS) {
-    val url = kubernetesTestComponents.kubernetesClient.getMasterUrl
-    val k8sMasterUrl = if (url.getPort < 0) {
-      s"k8s://${url.getHost}"
-    } else {
-      s"k8s://${url.getHost}:${url.getPort}"
-    }
-    sparkAppConf.set("spark.master", k8sMasterUrl)
-    runSparkPiAndVerifyCompletion()
-  }
-
-  test("Run SparkPi with an argument.") {
-    runSparkPiAndVerifyCompletion(appArgs = Array("5"))
-  }
-
-  test("Run SparkPi with custom labels, annotations, and environment variables.") {
-    sparkAppConf
-      .set("spark.kubernetes.driver.label.label1", "label1-value")
-      .set("spark.kubernetes.driver.label.label2", "label2-value")
-      .set("spark.kubernetes.driver.annotation.annotation1", "annotation1-value")
-      .set("spark.kubernetes.driver.annotation.annotation2", "annotation2-value")
-      .set("spark.kubernetes.driverEnv.ENV1", "VALUE1")
-      .set("spark.kubernetes.driverEnv.ENV2", "VALUE2")
-      .set("spark.kubernetes.executor.label.label1", "label1-value")
-      .set("spark.kubernetes.executor.label.label2", "label2-value")
-      .set("spark.kubernetes.executor.annotation.annotation1", "annotation1-value")
-      .set("spark.kubernetes.executor.annotation.annotation2", "annotation2-value")
-      .set("spark.executorEnv.ENV1", "VALUE1")
-      .set("spark.executorEnv.ENV2", "VALUE2")
-
-    runSparkPiAndVerifyCompletion(
-      driverPodChecker = (driverPod: Pod) => {
-        doBasicDriverPodCheck(driverPod)
-        checkCustomSettings(driverPod)
-      },
-      executorPodChecker = (executorPod: Pod) => {
-        doBasicExecutorPodCheck(executorPod)
-        checkCustomSettings(executorPod)
-      })
-  }
-
-  // TODO(ssuchter): Enable the below after debugging
-  // test("Run PageRank using remote data file") {
-  //   sparkAppConf
-  //     .set("spark.kubernetes.mountDependencies.filesDownloadDir",
-  //       CONTAINER_LOCAL_FILE_DOWNLOAD_PATH)
-  //     .set("spark.files", REMOTE_PAGE_RANK_DATA_FILE)
-  //   runSparkPageRankAndVerifyCompletion(
-  //     appArgs = Array(CONTAINER_LOCAL_DOWNLOADED_PAGE_RANK_DATA_FILE))
-  // }
-
-  private def runSparkPiAndVerifyCompletion(
+  private def runDFSReadWriteTestAndVerifyCompletion(
       appResource: String = containerLocalSparkDistroExamplesJar,
       driverPodChecker: Pod => Unit = doBasicDriverPodCheck,
       executorPodChecker: Pod => Unit = doBasicExecutorPodCheck,
       appArgs: Array[String] = Array.empty[String],
       appLocator: String = appLocator): Unit = {
+    sparkAppConf.set("spark.kubernetes.container.image.pullPolicy", "Always")
+
+    // For DC/OS that is: http://api.hdfs.marathon.l4lb.thisdcos.directory/v1/endpoints
+    val hadoopConf = sys.env.get("HADOOP_CONFIG_URL")
+    require(hadoopConf.nonEmpty)
+    hadoopConf
+      .foreach(sparkAppConf.set("spark.kubernetes.driverEnv.HADOOP_CONFIG_URL", _))
+    val args =
+      appArgs ++ Array("/etc/resolv.conf", s"hdfs:///test-${Random.alphanumeric.take(5).mkString}")
     runSparkApplicationAndVerifyCompletion(
       appResource,
-      SPARK_PI_MAIN_CLASS,
-      Seq("Pi is roughly 3"),
-      appArgs,
+      DFS_READ_WRITE_CLASS,
+      Seq("Success! Local Word Count"),
+      args,
       driverPodChecker,
       executorPodChecker,
       appLocator)
   }
 
-  private def runSparkPageRankAndVerifyCompletion(
+  private def runKafkaWithStructuredStreamingTestAndVerifyCompletion(
+      topic: String,
       appResource: String = containerLocalSparkDistroExamplesJar,
       driverPodChecker: Pod => Unit = doBasicDriverPodCheck,
       executorPodChecker: Pod => Unit = doBasicExecutorPodCheck,
-      appArgs: Array[String],
+      appArgs: Array[String] = Array.empty[String],
       appLocator: String = appLocator): Unit = {
+    sparkAppConf.set("spark.kubernetes.container.image.pullPolicy", "Always")
+
+    // For DC/OS that is: broker.kafka.l4lb.thisdcos.directory:9092
+    val kafkaBrokers = sys.env.get("KAFKA_BROKERS")
+    require(kafkaBrokers.nonEmpty)
+    val jars = System.getProperty("spark.kubernetes.test.extraJars")
+    require(jars != null)
+    val args = Array(
+      "--topic", topic,
+      "--bootstrapServers", kafkaBrokers.get,
+      "--checkpointDirectory", s"hdfs:///checkpoint-${Random.alphanumeric.take(5).mkString}"
+    )
+    // expected string:
+    // +--------+
+    // |count(1)|
+    // +--------+
+    // |     100|
+    // +--------+
+
     runSparkApplicationAndVerifyCompletion(
       appResource,
-      SPARK_PAGE_RANK_MAIN_CLASS,
-      Seq("1 has rank", "2 has rank", "3 has rank", "4 has rank"),
-      appArgs,
+      KAFKA_STRUCTURED_STREAMING_CONSOLE,
+      Seq("|count(1)|", "|     100|"),
+      args,
       driverPodChecker,
       executorPodChecker,
-      appLocator)
+      appLocator,
+      Some(jars))
+  }
+
+  private def runProducerTestAndVerifyCompletion(
+      topic: String,
+      appResource: String = containerLocalSparkDistroExamplesJar,
+      driverPodChecker: Pod => Unit = doBasicDriverPodCheck,
+      executorPodChecker: Pod => Unit = doBasicExecutorPodCheck,
+      appArgs: Array[String] = Array.empty[String],
+      appLocator: String = appLocator): Unit = {
+    sparkAppConf.set("spark.kubernetes.container.image.pullPolicy", "Always")
+
+    // For DC/OS that is: broker.kafka.l4lb.thisdcos.directory:9092
+    val kafkaBrokers = sys.env.get("KAFKA_BROKERS")
+    require(kafkaBrokers.nonEmpty)
+    val jars = System.getProperty("spark.kubernetes.test.extraJars")
+    require(jars != null)
+
+    val args = Array(
+      "--topic", topic,
+      "--bootstrapServers", kafkaBrokers.get,
+      "--step", "1",
+      "--maxRecords", "100"
+    )
+    runSparkApplicationAndVerifyCompletion(
+      appResource,
+      KAFKA_SIMPLE_PRODUCER_CLASS,
+      Seq("Success!"),
+      args,
+      driverPodChecker,
+      executorPodChecker,
+      appLocator,
+      Some(jars))
   }
 
   private def runSparkApplicationAndVerifyCompletion(
@@ -202,13 +223,15 @@ private[spark] class KubernetesSuite extends SparkFunSuite
       appArgs: Array[String],
       driverPodChecker: Pod => Unit,
       executorPodChecker: Pod => Unit,
-      appLocator: String): Unit = {
+      appLocator: String,
+      extraJars: Option[String] = None): Unit = {
     val appArguments = SparkAppArguments(
       mainAppResource = appResource,
       mainClass = mainClass,
       appArgs = appArgs)
-    SparkAppLauncher.launch(appArguments, sparkAppConf, TIMEOUT.value.toSeconds.toInt, sparkHomeDir)
 
+    CustomSparkAppLauncher.
+      launch(appArguments, sparkAppConf, TIMEOUT.value.toSeconds.toInt, sparkHomeDir, extraJars)
     val driverPod = kubernetesTestComponents.kubernetesClient
       .pods()
       .withLabel("spark-app-locator", appLocator)
@@ -250,24 +273,6 @@ private[spark] class KubernetesSuite extends SparkFunSuite
     assert(executorPod.getSpec.getContainers.get(0).getName === "executor")
   }
 
-  private def checkCustomSettings(pod: Pod): Unit = {
-    assert(pod.getMetadata.getLabels.get("label1") === "label1-value")
-    assert(pod.getMetadata.getLabels.get("label2") === "label2-value")
-    assert(pod.getMetadata.getAnnotations.get("annotation1") === "annotation1-value")
-    assert(pod.getMetadata.getAnnotations.get("annotation2") === "annotation2-value")
-
-    val container = pod.getSpec.getContainers.get(0)
-    val envVars = container
-      .getEnv
-      .asScala
-      .map { env =>
-        (env.getName, env.getValue)
-      }
-      .toMap
-    assert(envVars("ENV1") === "VALUE1")
-    assert(envVars("ENV2") === "VALUE2")
-  }
-
   private def deleteDriverPod(): Unit = {
     kubernetesTestComponents.kubernetesClient.pods().withName(driverPodName).delete()
     Eventually.eventually(TIMEOUT, INTERVAL) {
@@ -279,19 +284,45 @@ private[spark] class KubernetesSuite extends SparkFunSuite
   }
 }
 
-private[spark] object KubernetesSuite {
-
+private[spark] object LightbendKubernetesSuite {
   val TIMEOUT = PatienceConfiguration.Timeout(Span(2, Minutes))
   val INTERVAL = PatienceConfiguration.Interval(Span(2, Seconds))
-  val SPARK_PI_MAIN_CLASS: String = "org.apache.spark.examples.SparkPi"
-  val SPARK_PAGE_RANK_MAIN_CLASS: String = "org.apache.spark.examples.SparkPageRank"
-
-  // val CONTAINER_LOCAL_FILE_DOWNLOAD_PATH = "/var/spark-data/spark-files"
-
-  // val REMOTE_PAGE_RANK_DATA_FILE =
-  //   "https://storage.googleapis.com/spark-k8s-integration-tests/files/pagerank_data.txt"
-  // val CONTAINER_LOCAL_DOWNLOADED_PAGE_RANK_DATA_FILE =
-  //   s"$CONTAINER_LOCAL_FILE_DOWNLOAD_PATH/pagerank_data.txt"
-
-  // case object ShuffleNotReadyException extends Exception
+  val DFS_READ_WRITE_CLASS: String = "org.apache.spark.examples.DFSReadWriteTest"
+  val KAFKA_SIMPLE_PRODUCER_CLASS: String =
+    "com.lightbend.fdp.spark.k8s.test.KafkaSimpleProducer"
+  val KAFKA_STRUCTURED_STREAMING_CONSOLE =
+    "com.lightbend.fdp.spark.k8s.test.KafkaToHdfsWithCheckpointing"
 }
+
+private[spark] object CustomSparkAppLauncher extends Logging {
+
+  def launch(
+      appArguments: SparkAppArguments,
+      appConf: SparkAppConf,
+      timeoutSecs: Int,
+      sparkHomeDir: Path,
+      extraJars: Option[String] = None): Unit = {
+    val sparkSubmitExecutable = sparkHomeDir.resolve(Paths.get("bin", "spark-submit"))
+    logInfo(s"Launching a spark app with arguments $appArguments and conf $appConf")
+
+    val jars = {
+      extraJars match {
+      case Some(value) => Array("--jars", value)
+      case None => Array[String]()
+      }
+    }
+    val commandLine = (Array(sparkSubmitExecutable.toFile.getAbsolutePath,
+      "--deploy-mode", "cluster",
+      "--class", appArguments.mainClass,
+      "--master", appConf.get("spark.master")
+    ) ++ jars ++ appConf.toStringArray :+
+      appArguments.mainAppResource) ++
+      appArguments.appArgs
+    val output = ProcessUtils.executeProcess(commandLine, timeoutSecs)
+    // scalastyle:off println
+    // output.foreach(println(_))
+    // scalastyle:on println
+  }
+}
+
+
