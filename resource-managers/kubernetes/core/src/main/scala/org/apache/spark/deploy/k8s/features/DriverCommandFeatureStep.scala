@@ -109,6 +109,16 @@ private[spark] class DriverCommandFeatureStep(conf: KubernetesDriverConf)
   }
 
   private def additionalJavaProperties(resource: String): Map[String, String] = {
+    // update the custom scheme for the file to be uploaded if any, and override the key
+    // in spark conf to reflect that. Without this Spark driver will try to download a file with
+    // with the custom scheme later on.
+    val parsedResource = KubernetesUtils.getDestPathIfClientFile(resource, conf.sparkConf)
+    conf.sparkConf.set("spark.jars", Utils.stringToSeq(conf.get("spark.jars", "")).map {
+      x => if (x.equals(resource)) {
+        parsedResource
+      } else x
+    }.mkString(","))
+
     resourceType(APP_RESOURCE_TYPE_JAVA) ++ mergeFileList(JARS, Seq(resource))
   }
 

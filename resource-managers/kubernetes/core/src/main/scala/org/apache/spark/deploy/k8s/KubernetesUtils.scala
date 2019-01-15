@@ -22,10 +22,14 @@ import scala.collection.JavaConverters._
 
 import io.fabric8.kubernetes.api.model.{Container, ContainerBuilder, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, Pod, PodBuilder}
 import io.fabric8.kubernetes.client.KubernetesClient
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.deploy.k8s.Config.{KUBERNETES_FILE_UPLOAD_PATH, KUBERNETES_FILE_UPLOAD_SCHEME}
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.Utils
+import org.apache.spark.util.Utils.getHadoopFileSystem
 
 private[spark] object KubernetesUtils extends Logging {
 
@@ -71,17 +75,64 @@ private[spark] object KubernetesUtils extends Logging {
    * - File URIs with scheme local:// resolve to just the path of the URI.
    * - Otherwise, the URIs are returned as-is.
    */
-  def resolveFileUrisAndPath(fileUris: Iterable[String]): Iterable[String] = {
+  def resolveFileUrisAndPath(fileUris: Iterable[String], conf: Option[SparkConf] = None)
+  : Iterable[String] = {
     fileUris.map { uri =>
-      resolveFileUri(uri)
+      resolveFileUri(uri, conf)
     }
   }
 
-  def resolveFileUri(uri: String): String = {
+  /**
+   * Get the final path for a client file, if not return the uri as is.
+   *
+   */
+  def getDestPathIfClientFile(uri: String, conf: SparkConf): String = {
+    val fileUri = Utils.resolveURI(uri)
+    val fileScheme = Option(fileUri.getScheme).getOrElse("file")
+    if (fileScheme == "client") {
+      if (conf.get(KUBERNETES_FILE_UPLOAD_PATH).isDefined) {
+        val uploadPath = conf.get(KUBERNETES_FILE_UPLOAD_PATH).get
+        s"${uploadPath}/${fileUri.getPath.split("/").last}"
+      } else {
+        throw new SparkException("Please specify " +
+          "spark.kubernetes.file.upload.path property...")
+      }
+    } else {
+      uri
+    }
+  }
+
+  /**
+   *  Resolves a uri according to its scheme. If scheme is client
+   *  then uploads the file to the HCFS.
+   */
+  def resolveFileUri(uri: String, conf: Option[SparkConf] = None): String = {
     val fileUri = Utils.resolveURI(uri)
     val fileScheme = Option(fileUri.getScheme).getOrElse("file")
     fileScheme match {
       case "local" => fileUri.getPath
+      case KUBERNETES_FILE_UPLOAD_SCHEME =>
+        conf match {
+          case Some(sConf) =>
+            if (sConf.get(KUBERNETES_FILE_UPLOAD_PATH).isDefined) {
+              try {
+                val hadoopConf = SparkHadoopUtil.get.newConfiguration(sConf)
+                val uploadPath = sConf.get(KUBERNETES_FILE_UPLOAD_PATH).get
+                val fs = getHadoopFileSystem(Utils.resolveURI(uploadPath), hadoopConf)
+                val storePath = new Path(s"${uploadPath}/${fileUri.getPath.split("/").last}")
+                log.info(s"Uploading file: ${fileUri.getPath}...")
+                Utils.uploadHcfsFile(new Path(fileUri.getPath), storePath, fs)
+                s"${uploadPath}/${fileUri.getPath.split("/").last}"
+              } catch {
+                case e: Exception =>
+                  throw new SparkException(s"Uploading file ${fileUri.getPath} failed...", e)
+              }
+            } else {
+              throw new SparkException("Please specify " +
+                "spark.kubernetes.file.upload.path property...")
+            }
+          case None => throw new SparkException("Spark configuration is missing...")
+        }
       case _ => uri
     }
   }

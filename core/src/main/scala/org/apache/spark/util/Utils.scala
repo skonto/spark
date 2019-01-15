@@ -717,6 +717,24 @@ private[spark] object Utils extends Logging {
   }
 
   /**
+   * Upload a file to a Hadoop-compatible filesystem.
+   *
+   */
+  def uploadHcfsFile(
+      src: Path,
+      dest: Path,
+      fs: FileSystem,
+      delSrc : Boolean = false,
+      overwrite: Boolean = true): Unit = {
+    try {
+      fs.copyFromLocalFile(false, true, src, dest)
+    } catch {
+      case e: IOException =>
+        throw new SparkException(s"Error uploading file ${src.getName}", e)
+    }
+  }
+
+  /**
    * Validate that a given URI is actually a valid URL as well.
    * @param uri The URI to validate
    */
