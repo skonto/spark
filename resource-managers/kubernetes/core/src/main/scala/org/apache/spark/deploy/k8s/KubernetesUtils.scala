@@ -16,18 +16,26 @@
  */
 package org.apache.spark.deploy.k8s
 
-import java.io.File
+import java.io.{File, IOException}
 import java.security.SecureRandom
 
 import scala.collection.JavaConverters._
 
 import io.fabric8.kubernetes.api.model.{Container, ContainerBuilder, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, Pod, PodBuilder}
 import io.fabric8.kubernetes.client.KubernetesClient
+
 import org.apache.commons.codec.binary.Hex
+import org.apache.hadoop.fs.{FileSystem, Path}
+
 
 import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.deploy.k8s.Config.KUBERNETES_FILE_UPLOAD_PATH
+import org.apache.spark.deploy.k8s.Constants.KUBERNETES_FILE_UPLOAD_SCHEME
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.{Clock, SystemClock, Utils}
+import org.apache.spark.util.Utils.getHadoopFileSystem
+
 
 private[spark] object KubernetesUtils extends Logging {
 
@@ -209,4 +217,20 @@ private[spark] object KubernetesUtils extends Logging {
     Hex.encodeHexString(random) + time
   }
 
+  /**
+   * Upload a file to a Hadoop-compatible filesystem.
+   */
+  private def uploadFileToHadoopCompatibleFS(
+      src: Path,
+      dest: Path,
+      fs: FileSystem,
+      delSrc : Boolean = false,
+      overwrite: Boolean = true): Unit = {
+    try {
+      fs.copyFromLocalFile(false, true, src, dest)
+    } catch {
+      case e: IOException =>
+        throw new SparkException(s"Error uploading file ${src.getName}", e)
+    }
+  }
 }
